@@ -98,27 +98,6 @@ jobs:
           }
           Write-Host "TCP connectivity successful!"
 
-      - name: Install Virtual Display Driver for Remotly
-        run: |
-          Invoke-WebRequest -Uri "https://github.com" -OutFile "driver.zip"
-          Expand-Archive -Path "driver.zip" -DestinationPath "C:\IddSampleDriver"
-          Import-Certificate -FilePath "C:\IddSampleDriver\IddSampleDriver.cer" -CertStoreLocation "Cert:\LocalMachine\TrustedPublisher"
-          Import-Certificate -FilePath "C:\IddSampleDriver\IddSampleDriver.cer" -CertStoreLocation "Cert:\LocalMachine\Root"
-          & "C:\IddSampleDriver\nefconw.exe" --install "C:\IddSampleDriver\IddSampleDriver.inf"
-
-      - name: Optimize Graphics and Prevent GUI Sleep
-        run: |
-          reg add "HKLM\Software\Policies\Microsoft\Windows NT\Terminal Services" /v KeepAliveEnable /t REG_DWORD /d 1 /f
-          reg add "HKLM\Software\Policies\Microsoft\Windows NT\Terminal Services" /v MaxIdleTime /t REG_DWORD /d 0 /f
-          reg add "HKLM\Software\Policies\Microsoft\Windows NT\Terminal Services" /v MaxDisconnectionTime /t REG_DWORD /d 0 /f
-
-      - name: Kick RDP to Console
-        run: |
-          query user
-          tscon 1 /dest:console 2>&1 | Out-Null
-          tscon 2 /dest:console 2>&1 | Out-Null
-          tscon 3 /dest:console 2>&1 | Out-Null
-
       - name: Maintain Connection
         run: |
           Write-Host "`n=== RDP ACCESS ==="
@@ -132,4 +111,3 @@ jobs:
               Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
               Start-Sleep -Seconds 300
           }
-          
