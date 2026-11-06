@@ -4,110 +4,89 @@ on:
   workflow_dispatch:
 
 jobs:
-  secure-rdp:
-    runs-on: windows-latest
-    timeout-minutes: 3600
+  launch-win10:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3600 # Будет работать до 6 часов (лимит GitHub)
 
     steps:
-      - name: Configure Core RDP Settings
-        run: |
-          # Enable Remote Desktop and disable Network Level Authentication (if needed)
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-                             -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "SecurityLayer" -Value 0 -Force
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-          # Remove any existing rule with the same name to avoid duplication
-          netsh advfirewall firewall delete rule name="RDP-Tailscale"
-          
-          # For testing, allow any incoming connection on port 3389
-          netsh advfirewall firewall add rule name="RDP-Tailscale" `
-            dir=in action=allow protocol=TCP localport=3389
-
-          # (Optional) Restart the Remote Desktop service to ensure changes take effect
-          Restart-Service -Name TermService -Force
-
-      - name: Create RDP User with Secure Password
+      - name: Install Tailscale on Ubuntu Host
         run: |
-          Add-Type -AssemblyName System.Security
-          $charSet = @{
-              Upper   = [char[]](65..90)      # A-Z
-              Lower   = [char[]](97..122)     # a-z
-              Number  = [char[]](48..57)      # 0-9
-              Special = ([char[]](33..47) + [char[]](58..64) +
-                         [char[]](91..96) + [char[]](123..126)) # Special characters
-          }
-          $rawPassword = @()
-          $rawPassword += $charSet.Upper | Get-Random -Count 4
-          $rawPassword += $charSet.Lower | Get-Random -Count 4
-          $rawPassword += $charSet.Number | Get-Random -Count 4
-          $rawPassword += $charSet.Special | Get-Random -Count 4
-          $password = -join ($rawPassword | Sort-Object { Get-Random })
-          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-          New-LocalUser -Name "Skyro" -Password $securePass -AccountNeverExpires
-          Add-LocalGroupMember -Group "Administrators" -Member "Skyro"
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "Skyro"
+          curl -fsSL https://tailscale.com | sh
           
-          echo "RDP_CREDS=User: Skyro | Password: $password" >> $env:GITHUB_ENV
-          
-          if (-not (Get-LocalUser -Name "Skyro")) {
-              Write-Error "User creation failed"
-              exit 1
-          }
+      - name: Connect to Tailscale Network
+        run: |
+          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-win10-host
 
-      - name: Install Tailscale
+      - name: Start Windows 10 inside Docker (QEMU KVM)
         run: |
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $installerPath = "$env:TEMP\tailscale.msi"
-          
-          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-          Remove-Item $installerPath -Force
+          # Запуск контейнера Dockur/Windows. Он автоматически скачает чистый ISO Windows 10.
+          # Выделяем машине 2 ядра и около 5 ГБ оперативной памяти (доступный максимум на бесплатном раннере).
+          docker run -d \
+            --name windows10 \
+            --device=/dev/kvm \
+            --cap-add=NET_ADMIN \
+            -p 3389:3389 \
+            -e VERSION="10" \
+            -e RAM="5G" \
+            -e CORES="2" \
+            -e USER="Skyro" \
+            -e PASS="SecurePassword123!" \
+            dockur/windows
 
-      - name: Establish Tailscale Connection
+      - name: Wait for Windows 10 Boot and Setup
         run: |
-          # Bring up Tailscale with the provided auth key and set a unique hostname
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
+          echo "Windows 10 устанавливается и загружается в фоне..."
+          echo "Это займет от 3 до 5 минут (скачивание ISO + автоустановка)."
           
-          # Wait for Tailscale to assign an IP
-          $tsIP = $null
-          $retries = 0
-          while (-not $tsIP -and $retries -lt 10) {
-              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-              Start-Sleep -Seconds 5
-              $retries++
-          }
-          
-          if (-not $tsIP) {
-              Write-Error "Tailscale IP not assigned. Exiting."
-              exit 1
-          }
-          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-      
-      - name: Verify RDP Accessibility
-        run: |
-          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-          
-          # Test connectivity using Test-NetConnection against the Tailscale IP on port 3389
-          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-          if (-not $testResult.TcpTestSucceeded) {
-              Write-Error "TCP connection to RDP port 3389 failed"
-              exit 1
-          }
-          Write-Host "TCP connectivity successful!"
+          # Цикл проверки доступности RDP порта (3389) внутри контейнера
+          for i in {1..60}; do
+            if nc -z 127.0.0.1 3389; then
+               echo "=== Windows 10 RDP Готов к подключению! ==="
+               break
+            fi
+            sleep 10
+          done
 
-      - name: Maintain Connection
+      - name: Display Connection Info
         run: |
-          Write-Host "`n=== RDP ACCESS ==="
-          Write-Host "Address: $env:TAILSCALE_IP"
-          Write-Host "Username: Skyro"
-          Write-Host "Password: $(echo $env:RDP_CREDS)"
-          Write-Host "==================`n"
+          # Получаем IP адрес текущего Linux-раннера в сети Tailscale
+          TS_IP=$(tailscale ip -4)
           
-          # Keep runner active indefinitely (or until manually cancelled)
-          while ($true) {
-              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
-              Start-Sleep -Seconds 300
-          }
+          echo -e "\n=============================================="
+          echo -e "    ДАННЫЕ ДЛЯ ПОДКЛЮЧЕНИЯ К WINDOWS 10 RDP   "
+          echo -e "=============================================="
+          echo -e "Адрес (Компьютер): $TS_IP"
+          echo -e "Имя пользователя:  Skyro"
+          echo -e "Пароль:            SecurePassword123!"
+          echo -e "==============================================\n"
+
+      - name: Keep Alive (Maintain Session)
+        run: |
+          # Держим воркфлоу активным, пока вы сами его не отмените (или пока не пройдут 6 часов)
+          while true; do
+            echo "[$(date)] Виртуальная машина Windows 10 активна. Подключайтесь через RDP."
+            sleep 300
+          done
+```
+
+---
+
+### Как этим пользоваться?
+
+1. **Tailscale Auth Key:** Убедитесь, что в настройках вашего репозитория (*Settings -> Secrets and variables -> Actions*) добавлен секрет `TAILSCALE_AUTH_KEY`. 
+   * *Совет:* В панели управления Tailscale при создании ключа поставьте галочку **Ephemeral** (чтобы временные машины сами удалялись из вашего аккаунта после закрытия вкладки в GitHub) и **Reusable**.
+2. **Запуск:** Перейдите во вкладку **Actions**, выберите воркфлоу `Windows 10 RDP via Tailscale` и нажмите **Run workflow**.
+3. **Подключение:** Подождите примерно 4–5 минут. В логах шага `Display Connection Info` появится IP-адрес. Скопируйте его.
+4. Откройте «Подключение к удаленному рабочему столу» (RDP) на вашем основном ПК, введите этот IP, а затем логин `Skyro` и пароль `SecurePassword123!`.
+
+### В чем плюсы такой схемы перед вашим прошлым скриптом?
+* Вы получаете **настоящую десктопную Windows 10 Enterprise** (Evaluation), а не Windows Server.
+* Скрипт генерации пароля заменен на статичный (`SecurePassword123!`), чтобы вам не пришлось судорожно искать сгенерированный пароль в логах — вы можете подключиться сразу, как только машина поднимет порт.
+* Контейнер сам проводит полностью автоматическую (unattended) установку ОС, настраивает пользователя и активирует RDP-сервер.
+
+<FollowUp>
+Удалось ли вам успешно пройти авторизацию в **Tailscale** и поднять контейнер? Если возникнут задержки на этапе скачивания ISO-образа внутри экшена, дайте знать — я покажу, как оптимизировать этот шаг.
+</FollowUp>
