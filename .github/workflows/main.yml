@@ -98,16 +98,25 @@ jobs:
           }
           Write-Host "TCP connectivity successful!"
 
+      - name: Install and Start Sunshine
+        run: |
+          $url = "https://github.com"
+          Invoke-WebRequest -Uri $url -OutFile "sunshine.exe"
+          Start-Process -FilePath ".\sunshine.exe" -ArgumentList "/S" -Wait
+          & "C:\Program Files\Sunshine\sunshine.exe" --install-service
+          Start-Service -Name "SunshineService"
+
       - name: Maintain Connection
         run: |
-          Write-Host "`n=== RDP ACCESS ==="
+          Write-Host "`n=== MOONLIGHT / RDP ACCESS ==="
           Write-Host "Address: $env:TAILSCALE_IP"
           Write-Host "Username: Skyro"
           Write-Host "Password: $(echo $env:RDP_CREDS)"
-          Write-Host "==================`n"
+          Write-Host "==============================`n"
           
           # Keep runner active indefinitely (or until manually cancelled)
           while ($true) {
-              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
+              Write-Host "[$(Get-Date)] RDP & Sunshine Active - Connect via Moonlight"
               Start-Sleep -Seconds 300
           }
+          
